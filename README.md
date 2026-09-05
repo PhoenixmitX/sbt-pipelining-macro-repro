@@ -20,7 +20,7 @@ Step 2 fails with:
 [error]   |  This is likely because class files could not be found in the classpath entry for the symbol.
 [error]   |  A possible cause is if the origin of this symbol was built with pipelined compilation;
 [error]   |  in which case, this problem may go away by disabling pipelining for that origin.
-[error]   |  trait Logger is defined in file target/out/jvm/scala-3.9.0/core/early/core_3-0.1.0-SNAPSHOT.jar(core/Base.tasty)
+[error]   |  trait Base is defined in file target/out/jvm/scala-3.9.0/core/early/core_3-0.1.0-SNAPSHOT.jar(core/Base.tasty)
 ```
 
 ## What differs between the two runs
