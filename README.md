@@ -13,14 +13,14 @@ sbt compile                                   # 2. incremental: [error] in app/U
 Step 2 fails with:
 
 ```
-[error] -- Error: app/src/main/scala/app/Use.scala:4:32
-[error] 4 |  private val logger: Logger = Logger.get
-[error]   |                               ^^^^^^^^^^
-[error]   |Macro code depends on trait Logger in package core found on the classpath, but could not be loaded while evaluating the macro.
+[error] -- Error: app/src/main/scala/app/Use.scala:4:24
+[error] 4 |  val impl: Impl = Impl.make
+[error]   |                   ^^^^^^^^^
+[error]   |Macro code depends on trait Base in package core found on the classpath, but could not be loaded while evaluating the macro.
 [error]   |  This is likely because class files could not be found in the classpath entry for the symbol.
 [error]   |  A possible cause is if the origin of this symbol was built with pipelined compilation;
 [error]   |  in which case, this problem may go away by disabling pipelining for that origin.
-[error]   |  trait Logger is defined in file target/out/jvm/scala-3.9.0/core/early/core_3-0.1.0-SNAPSHOT.jar(core/Logger.tasty)
+[error]   |  trait Logger is defined in file target/out/jvm/scala-3.9.0/core/early/core_3-0.1.0-SNAPSHOT.jar(core/Base.tasty)
 ```
 
 ## What differs between the two runs
@@ -35,7 +35,7 @@ With `app / scalacOptions += "-Ylog-classpath"`, the `core` entry scalac is give
 `core` defines a macro. On the clean build sbt correctly does not compile `app` against
 core's early output (the classic "upstream has macros" pipelining fallback), but on the
 incremental build, where `core` is already up to date, `app` is compiled against the early jar
-anyway. Evaluating `app`'s own macro loads `app.Logger`, whose supertype `core.Logger` then has
+anyway. Evaluating `app`'s own macro loads `app.Impl`, whose supertype `core.Base` then has
 no class file on the classpath, so the compiler reports the error above.
 
 ## Matrix
@@ -56,7 +56,7 @@ incremental failure remains.
 
 ## Related, but not the same bug
 
-If `core` defines no macro at all, `app` (which does define a macro whose classes extend a
+If `core` defines no macro at all, `app` (which does define a macro whose classes extend the
 `core` trait) fails on the *clean* build too, on both sbt 1.13.0 and 2.0.8, because sbt only
 guards the "upstream defines macros" case. That is the documented limitation the compiler
 message points at, and `core / exportPipelining := false` is the intended fix. The regression
