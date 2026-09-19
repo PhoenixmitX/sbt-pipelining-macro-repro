@@ -38,7 +38,14 @@ Step 5 fails with:
 ```
 
 The new type `Paged` resolves; every *unchanged* `core` type does not. A second `sbt compile`
-fails the same way. After step 5 the early jar `core` exports to `app` holds one entry:
+fails the same way.
+
+Step 2 can also be `sbt clean` (or just `core/clean`). What matters is that step 3 serves `core`'s
+`compileIncremental` from the action cache. In this two-module project both wipes do that. In a
+larger build `rm -rf target/out` may miss for a module a few times (upstream modules hit first and
+that changes the module's classpath shape and cache key) and `<upstream>/clean; compile` with no
+source change is the reliable way to get the hit. Check for it: after step 3 the module's `early/`
+directory is missing and its on-disk `classes/` directory is empty. After step 5 the early jar `core` exports to `app` holds one entry:
 
 ```
 $ unzip -l target/out/jvm/scala-3.9.0/core/early/core_3-0.1.0-SNAPSHOT.jar
@@ -82,12 +89,28 @@ Scala 3.9.0, JDK 25.0.4, Linux x86_64. The variants ran in separate copies of th
 its own sbt server (the `sbtn` thin client is the default in sbt 2; copying `project/target/active.json`
 along makes a copy talk to the original server).
 
+## Experimenting
+
+The action cache is keyed on inputs, so an edit that was compiled once at a path is served from the
+cache when it is repeated at that path, even with the trap armed: no upstream compile line, no early
+jar, no error. That reads as a false negative. Use a change that was never compiled before, or set
+`Global / localCacheDirectory` to an empty directory for each experiment.
+
 ## Recovery / workarounds
 
 - Kill the sbt server, `rm -rf target/out`, `sbt compile`: `core` hits the cache again, so it has no
   early jar and `app` compiles against `core`'s full products. The trap is armed again for the next
   incremental change to `core`.
 - `core / exportPipelining := false` (no early jar for `core` at all) or `usePipelining := false`.
+
+## Where this was first seen
+
+A Scala 3 monorepo (sbt 2.0.9, pipelining on): two worktrees had run `<upstream>/clean` plus a
+rebuild with the upstream unchanged, then a rebase changed four upstream sources, and the first
+incremental compile of the downstream module failed with 55 and 75 "Not found" errors, all for
+upstream types the rebase had not touched. The same chain was replayed on that build with a
+one-line upstream edit: after `<upstream>/clean; compile` twice, the early jar was missing; the next
+edit produced an early jar with one entry and the downstream compile failed.
 
 ## Related
 
