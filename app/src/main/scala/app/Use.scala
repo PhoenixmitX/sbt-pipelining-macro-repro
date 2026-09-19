@@ -1,4 +1,6 @@
 package app
 
+import core.*
+
 object Use:
-  val impl: Impl = Impl.make
+  val row: Row[Item] = Row(List(Item("a")))

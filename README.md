@@ -1,63 +1,97 @@
-# sbt 2 pipelining: incremental compile hands downstream a macro-defining upstream's TASTy-only early jar
+# sbt 2 pipelining: after an action-cache hit, the upstream early jar is rebuilt from the next incremental round only
 
-Reproduction for an sbt 2.0.8 regression (sbt 1.13.0 is fine). Report to **sbt/sbt**.
+Reproduction for sbt 2.0.9 (also 2.0.8). Report to **sbt/sbt**.
+
+Two plain Scala 3 modules, no macros: `core` (`Item`, `Row`) and `app`, which uses them.
+`ThisBuild / usePipelining := true`.
 
 ## Reproduce
 
 ```bash
-sbt compile                                   # 1. clean build: [success]
-echo "// edit" >> app/src/main/scala/app/Use.scala
-sbt compile                                   # 2. incremental: [error] in app/Use.scala
+./repro.sh
 ```
 
-Step 2 fails with:
+which does, step by step:
 
-```
-[error] -- Error: app/src/main/scala/app/Use.scala:4:24
-[error] 4 |  val impl: Impl = Impl.make
-[error]   |                   ^^^^^^^^^
-[error]   |Macro code depends on trait Base in package core found on the classpath, but could not be loaded while evaluating the macro.
-[error]   |  This is likely because class files could not be found in the classpath entry for the symbol.
-[error]   |  A possible cause is if the origin of this symbol was built with pipelined compilation;
-[error]   |  in which case, this problem may go away by disabling pipelining for that origin.
-[error]   |  trait Base is defined in file target/out/jvm/scala-3.9.0/core/early/core_3-0.1.0-SNAPSHOT.jar(core/Base.tasty)
+```bash
+sbt compile                 # 1. clean build:                            [success]
+rm -rf target/out           # 2. wipe the build output (or: sbt clean); ~/.cache/sbt/v2 stays
+sbt compile                 # 3. core hits the action cache:             [success], but no core/early jar,
+                            #    and target/.../core/classes is empty on disk
+# 4. add core/Paged.scala (a new type) and use it from app/Use.scala
+sbt compile                 # 5. incremental:                            [error] Not found: type Row / Item
 ```
 
-## What differs between the two runs
+Step 5 fails with:
 
-With `app / scalacOptions += "-Ylog-classpath"`, the `core` entry scalac is given for `app` is:
+```
+[info] compiling 1 Scala source to target/out/jvm/scala-3.9.0/core/classes ...
+[info] compiling 1 Scala source to target/out/jvm/scala-3.9.0/app/classes ...
+[error] -- [E006] Not Found Error: app/src/main/scala/app/Use.scala:6:11
+[error] 6 |  val row: Row[Item] = Row(List(Item("a")))
+[error]   |           ^^^
+[error]   |           Not found: type Row
+[error] -- [E006] Not Found Error: app/src/main/scala/app/Use.scala:6:15
+[error]   |               Not found: type Item
+...
+[error] 5 errors found
+```
 
-| build | core entry on app's compiler classpath |
-|---|---|
-| clean | `target/out/jvm/scala-3.9.0/core/classes` (full class files) |
-| incremental (core up to date) | `target/out/jvm/scala-3.9.0/core/early/core_3-0.1.0-SNAPSHOT.jar` (TASTy only) |
+The new type `Paged` resolves; every *unchanged* `core` type does not. A second `sbt compile`
+fails the same way. After step 5 the early jar `core` exports to `app` holds one entry:
 
-`core` defines a macro. On the clean build sbt correctly does not compile `app` against
-core's early output (the classic "upstream has macros" pipelining fallback), but on the
-incremental build, where `core` is already up to date, `app` is compiled against the early jar
-anyway. Evaluating `app`'s own macro loads `app.Impl`, whose supertype `core.Base` then has
-no class file on the classpath, so the compiler reports the error above.
+```
+$ unzip -l target/out/jvm/scala-3.9.0/core/early/core_3-0.1.0-SNAPSHOT.jar
+     2508  core/Paged.tasty
+```
+
+and `target/out/jvm/scala-3.9.0/core/classes` holds only `Paged.class`, `Paged$.class`,
+`Paged.tasty`, while `classes.sbtdir.zip` and the packaged `core_3-0.1.0-SNAPSHOT.jar` are complete.
+
+## Why
+
+`compileIncremental` is a cached task (`Def.cachedTask`) whose declared outputs are the analysis file
+and the classes directory (`sbt.Defaults.cachedCompileIncrementalTask`). The pipelining early jar
+(`earlyOutput`) is not among them. On a cache hit Zinc does not run, the early jar is not restored, and
+`compileIncremental` re-derives the pipelining decision from the jar's presence on disk:
+
+```scala
+// sbt 2.0.9 Defaults.scala, TaskZero / compileIncremental
+ping.tryComplete(Result.Value(c.toPath(earlyOutput.value).toFile.exists && !definesMacro(analysis)))
+```
+
+So right after the hit there is no early jar and `app` falls back to `core`'s full products: fine.
+The next *incremental* compile of `core` is where it breaks. Zinc (2.0.4, `Incremental.scala`) has scalac
+write its pickles to a temporary `<early>-<uuid>.jar` and merges that into the real early jar
+(`mergeUpdates()` in `AnalysisCallback`, then `PickleJar.write`, which `touch`es the jar if it is missing
+and prunes entries whose class is no longer a product). With no jar to merge into, the "merged" jar
+contains only the units of that round, `afterEarlyOutput(true)` fires, and `app` is compiled
+against a jar that lacks every TASTy `core` did not just recompile.
 
 ## Matrix
 
-| sbt | Scala | clean | incremental after editing `app/Use.scala` |
+| sbt | pipelining | step 2 | result of step 5 |
 |---|---|---|---|
-| 2.0.8 (latest 2.x) | 3.9.0 | ok | **fails** |
-| 2.0.8 | 3.8.4 | ok | **fails** |
-| 1.13.0 (latest 1.x) | 3.9.0 | ok | ok |
+| 2.0.9 | `ThisBuild / usePipelining := true` | `rm -rf target/out` | **fails** |
+| 2.0.9 | `ThisBuild / usePipelining := true` | `sbt clean` | **fails** |
+| 2.0.8 | `ThisBuild / usePipelining := true` | `rm -rf target/out` | **fails** |
+| 2.0.9 | `ThisBuild / usePipelining := false` | `rm -rf target/out` | ok |
+| 2.0.9 | pipelining on, `core / exportPipelining := false` | `rm -rf target/out` | ok |
 
-Both `usePipelining := true` globally. JDK 25.0.4, Linux x86_64.
+Scala 3.9.0, JDK 25.0.4, Linux x86_64. The variants ran in separate copies of this directory, each with
+its own sbt server (the `sbtn` thin client is the default in sbt 2; copying `project/target/active.json`
+along makes a copy talk to the original server).
 
-## Workaround
+## Recovery / workarounds
 
-`core / exportPipelining := false` fixes it (no early jar is produced for `core`).
-`core / usePipelining := false` does **not** help: an early jar is still exported and the
-incremental failure remains.
+- Kill the sbt server, `rm -rf target/out`, `sbt compile`: `core` hits the cache again, so it has no
+  early jar and `app` compiles against `core`'s full products. The trap is armed again for the next
+  incremental change to `core`.
+- `core / exportPipelining := false` (no early jar for `core` at all) or `usePipelining := false`.
 
-## Related, but not the same bug
+## Related
 
-If `core` defines no macro at all, `app` (which does define a macro whose classes extend the
-`core` trait) fails on the *clean* build too, on both sbt 1.13.0 and 2.0.8, because sbt only
-guards the "upstream defines macros" case. That is the documented limitation the compiler
-message points at, and `core / exportPipelining := false` is the intended fix. The regression
-reported here is the clean/incremental inconsistency in the macro-defining-upstream case.
+- sbt/sbt#9546 — with pipelining, a downstream compile served a stale action-cache result after an
+  upstream deletion; also observes an empty `classes` directory in the pipelined build.
+- sbt/sbt#9715 (fixed in 2.0.9 by #9719) — the earlier repro on the `main` branch of this repo: a
+  macro-defining upstream was put on the pipelined classpath on incremental builds.
