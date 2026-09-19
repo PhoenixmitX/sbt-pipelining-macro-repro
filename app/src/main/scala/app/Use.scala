@@ -3,4 +3,4 @@ package app
 import core.*
 
 object Use:
-  val row: Row[Item] = Row(List(Item("a")))
+  val other: Other[Base] = Other(List(Base("a")))
